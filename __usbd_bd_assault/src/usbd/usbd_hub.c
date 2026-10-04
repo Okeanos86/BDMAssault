@@ -13,13 +13,13 @@
  * USB Driver function prototypes and constants.
  */
 
+#include "defs.h"
 #include "usbdpriv.h"
 #include "hcd.h"
 #include "mem.h"
 #include "usbio.h"
 #include "driver.h"
 
-#include "defs.h"
 #include "stdio.h"
 #include "sysclib.h"
 #include "sysmem.h"
