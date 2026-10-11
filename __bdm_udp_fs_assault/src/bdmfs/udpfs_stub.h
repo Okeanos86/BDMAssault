@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) 2026 Okeanos
+ * Licensed under the Academic Free License version 2.0
+ * See the LICENSE file; third-party components: docs/THIRD_PARTY_NOTICES.md
+ */
+
+/*
+ * udpfs_stub.h - UDPFS read-only fallback for the BDMFS "mass" driver.
+ *
+ * When a read-only open/getstat of a POPS/POPSx/<name>.VCD path fails on the
+ * USB filesystem (FatFs), fs_open/fs_getstat ask the UDPFS client
+ * (net/net_udpfs_client.c) for the same path. A handle returned by this stub
+ * is recognised by udpfs_stub_is_ours() and served with BREAD requests;
+ * everything else keeps going to FatFs unchanged. If the server does not have
+ * the file either, the original FatFs error is returned.
+ */
+#ifndef UDPFS_STUB_H
+#define UDPFS_STUB_H
+
+#include <iomanX.h>
+
+#define UDPFS_STUB_MAX_HANDLES 4
+
+/* Returns 1 if "name" is a file for which the UDPFS fallback is allowed
+ * (POPS/<something>.VCD or POPS0/.../POPS9/<something>.VCD - the
+ * folders POPStarter scans at startup - case-insensitive comparison,
+ * leading slashes ignored), otherwise 0. It does NOT say that the file
+ * exists: the fallback is only attempted after FatFs has failed. */
+int udpfs_stub_path_matches(const char *name);
+
+/* Allocates a slot and opens the REAL file over the network (UDPFS client).
+ * Returns an opaque pointer to put in fd->privdata, or NULL if the
+ * open fails (network not ready, timeout, file not found on the
+ * server side, slot pool full). */
+void *udpfs_stub_open(const char *path);
+
+/* Checks whether an fd->privdata pointer belongs to the fake slot pool
+ * (range-check on the static array, no dereferencing). */
+int udpfs_stub_is_ours(void *privdata);
+
+int udpfs_stub_read(void *privdata, void *buffer, int size);
+int udpfs_stub_lseek64(void *privdata, s64 offset, int whence, s64 *out_pos);
+int udpfs_stub_close(void *privdata);
+
+/* Stat via GETSTAT on the server (used by fs_getstat, which works by path,
+ * not by handle). Returns 0 and fills stat if the file exists on the server,
+ * <0 otherwise. */
+int udpfs_stub_getstat(const char *path, iox_stat_t *stat);
+
+#endif /* UDPFS_STUB_H */
