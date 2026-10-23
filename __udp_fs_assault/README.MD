@@ -1,4 +1,4 @@
-# UDP FS Assault
+# UDPFS Assault
 
 A PS2 IOP module that makes a **UDPFS server** look like the `mass:` device,
 with **read and write** support. Programs that expect a USB drive on `mass:`

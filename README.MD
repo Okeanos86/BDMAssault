@@ -1,6 +1,6 @@
-# UDP FS Assault
+# UDPFS Assault
 
-UDP FS Assault is a PS2 IOP module that makes a **UDPFS server** look like the `mass:` device, with **read and write** support. Programs that expect a USB drive on `mass:` (POPStarter, Ember) run with their files served over the network.
+UDPFS Assault is a PS2 IOP module that makes a **UDPFS server** look like the `mass:` device, with **read and write** support. Programs that expect a USB drive on `mass:` (POPStarter, Ember) run with their files served over the network.
 
 This branch is a fork of [israpps/BDMAssault](https://github.com/israpps/BDMAssault). The module lives in [`__udp_fs_assault`](__udp_fs_assault/README.MD).
 
@@ -15,7 +15,7 @@ BDM Assault is a homebrew project for PS2 that aims to bring EXFAT USB support t
 ## License
 
 This project is distributed under the terms found in the [LICENSE](LICENSE) file.
-UDP FS Assault and the UDPFS variant also include or derive from third-party works that keep their own licenses (PS2SDK, Neutrino/UDPBD/UDPFS, udpfsd and, for the hybrid variant, FatFs). The full lists, with copyright notices and license texts, are in [`__udp_fs_assault/docs/THIRD_PARTY_NOTICES.md`](__udp_fs_assault/docs/THIRD_PARTY_NOTICES.md) and the `licenses/` folders.
+UDPFS Assault also include or derive from third-party works that keep their own licenses (PS2SDK, Neutrino/UDPBD/UDPFS, udpfsd. The full lists, with copyright notices and license texts, are in [`__udp_fs_assault/docs/THIRD_PARTY_NOTICES.md`](__udp_fs_assault/docs/THIRD_PARTY_NOTICES.md) and the `licenses/` folders.
 
 ## Usage
 
@@ -55,5 +55,5 @@ the softwares found here were taken and modified from [__PS2SDK__](https://githu
 - krHACKen: for letting me know POPStarter loads external USB drivers (wich ended up in the creation of this project)
 - juankytutoriales: for making tests in real hardware
 - everyone that collaborated to PS2SDK
-- ps2max32 ([Neutrino](https://github.com/ps2max32/neutrino)): UDPFS/UDPBD/UDPRDMA protocol and network code used by UDP FS Assault and the UDPFS variant
+- ps2max32 ([Neutrino](https://github.com/ps2max32/neutrino)): UDPFS/UDPBD/UDPRDMA protocol and network code used by UDPFS Assault
 - PCM720 ([udpfsd](https://github.com/pcm720/udpfsd)): UDPFS server in Go, used as the reference for the client
