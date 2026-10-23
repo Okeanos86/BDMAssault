@@ -33,7 +33,7 @@ static struct file_system g_fs = {
  * it gives up on the DAT files and uses the defaults. */
 #define UDPFS_USB_WAIT_POLLS 200 /* x 50 ms = 10 s */
 
-/* The config files live on the USB drive (mass:/POPS/). Reading them needs
+/* The config files live on the USB drive (mass:/SYS-CONF/). Reading them needs
  * the volume mounted by the "mass" driver; mounted_bd is set before f_mount
  * runs, so also wait for FatFs to report a mounted file system. Pure polling
  * of driver state: no I/O, no module loading. */
@@ -58,7 +58,7 @@ static void net_init_thread(void *unused)
     UDPFS_MARK(UDPFS_M_DEV9);
     if (res != 0) {
         /* Without this, g_ready stays 0 forever and every fs_open that
-         * tries the UDPFS fallback waits for the whole timeout (6 s) before
+         * tries the UDPFS fallback waits for the whole timeout (14 s) before
          * failing, instead of exiting right away as per the requirement
          * "if not found in either, exit without errors". */
         udpfs_client_set_failed();
@@ -72,13 +72,13 @@ static void net_init_thread(void *unused)
         return;
     }
 
-    /* Configuration (mass:/POPS/IPCONFIG.DAT and UDPFSCONFIG.DAT): wait for
+    /* Configuration (mass:/SYS-CONF/IPCONFIG.DAT and UDPFSCONFIG.DAT): wait for
      * the USB drive, then read both files. Without a drive, or without files,
      * the defaults are used. The result is printed by udpfs_client_init once
      * the tty is up. */
     usb_wait_mounted();
     UDPFS_MARK(UDPFS_M_MC);
-    udpfs_config_apply(udpfs_cfg_read_file_iop);
+    udpfs_config_apply(udpfs_cfg_read_stash_or_usb);
     udpfs_client_init();
 }
 
@@ -104,6 +104,11 @@ int bdmfs_fatfs_start(int argc, char *argv[])
     (void)argv;
 
     UDPFS_MARK(UDPFS_M_START);
+    /* memory card config: first load reads it, second load gets it from IOP RAM */
+    udpfs_stash_init();
+#if defined(DEBUG)
+    udpfs_dbg_capture(argc, argv);
+#endif
 
     // The network semaphore must exist BEFORE the "mass" driver is
     // connected (bdm_connect_fs, below): from that moment fs_open can

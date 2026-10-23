@@ -7,7 +7,8 @@
 /*
  * udpfs_stub.h - UDPFS read-only fallback for the BDMFS "mass" driver.
  *
- * When a read-only open/getstat of a POPS/POPSx/<name>.VCD path fails on the
+ * When a read-only open/getstat of a POPS/POPSx/<name>.VCD or
+ * EMBER/games/<folder>/<name>.cue|.bin path fails on the
  * USB filesystem (FatFs), fs_open/fs_getstat ask the UDPFS client
  * (net/net_udpfs_client.c) for the same path. A handle returned by this stub
  * is recognised by udpfs_stub_is_ours() and served with BREAD requests;
@@ -21,10 +22,14 @@
 
 #define UDPFS_STUB_MAX_HANDLES 4
 
-/* Returns 1 if "name" is a file for which the UDPFS fallback is allowed
- * (POPS/<something>.VCD or POPS0/.../POPS9/<something>.VCD - the
- * folders POPStarter scans at startup - case-insensitive comparison,
- * leading slashes ignored), otherwise 0. It does NOT say that the file
+/* Returns 1 if "name" is a file for which the UDPFS fallback is allowed,
+ * otherwise 0. One rule per build (case-insensitive comparison, leading
+ * slashes ignored):
+ *   - POPStarter build (default): POPS/<x>.VCD and POPS0/ ... POPS9/<x>.VCD
+ *     (the folders POPStarter scans at startup)
+ *   - Ember build (make EMBER=1): EMBER/games/<folder>/<x>.cue and <x>.bin
+ *     (one folder level)
+ * It does NOT say that the file
  * exists: the fallback is only attempted after FatFs has failed. */
 int udpfs_stub_path_matches(const char *name);
 

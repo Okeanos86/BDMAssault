@@ -49,6 +49,8 @@ void udpfs_mark(int id)
  * are short: the UDP tty truncates at ~64 characters. */
 void udpfs_marks_print(void)
 {
+    udpfs_dbg_print();
+
     static const char *const names[UDPFS_M_COUNT] = {"start", "usb", "ip", "cfg", "dev9", "smap", "link", "disc", "ready"};
     char line[64];
     int i, n = 0;

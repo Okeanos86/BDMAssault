@@ -4,13 +4,13 @@
  * See the LICENSE file; third-party components: docs/THIRD_PARTY_NOTICES.md
  *
  * Parts of the network handling derive from UDPBD and the UDPFS/UDPRDMA
- * protocol of Neutrino (rickgaiser), Academic Free License 3.0.
+ * protocol of Neutrino (ps2max32), Academic Free License 3.0.
  */
 
 /*
  * net_udpfs_client.c - minimal UDPFS client (see udpfs_client.h)
  *
- * Packet format VERIFIED against the real sources of rickgaiser/neutrino
+ * Packet format VERIFIED against the real sources of ps2max32/neutrino
  * (iop/udpfs/src/udprdma_packet.h for the C struct, pc/udpfs_server.py
  * Header/DataHeader classes pack/unpack for the definitive truth on the
  * bit layout): little-endian on both sides (IOP MIPS and PC server are
@@ -26,8 +26,9 @@
  * client only in the INFORM reply. With a fixed IP (UDPFSCONFIG.DAT) the
  * DISCOVERY goes directly to the server, otherwise it is broadcast; the
  * INFORM provides the data port, IP and MAC (then Ethernet unicast).
- * Three attempts within the allowed time; after that, a lazy retry on the
- * next request.
+ * Boot discovery: 6 DISCOVERY packets over a 3 s window (short windows of 3
+ * packets are used later, see udpfs_discover); if no INFORM arrives, a lazy
+ * retry on a later request.
  */
 #include <stdint.h>
 #include <string.h>
@@ -36,9 +37,6 @@
 #include <thsemap.h>
 #include <smapregs.h>
 #include <stdio.h>
-#ifdef UDPFS_STATS
-#include <sysclib.h>
-#endif
 
 #include "ministack.h"
 #include "udpfs_client.h"
@@ -64,7 +62,7 @@ int smap_is_initialized(void);
 #define UDPRDMA_FLAG_FIN 0x2
 
 /*
- * Format CONFIRMED against the real sources of rickgaiser/neutrino
+ * Format CONFIRMED against the real sources of ps2max32/neutrino
  * (iop/udpfs/src/udprdma_packet.h and pc/udpfs_server.py, Header/DataHeader
  * pack/unpack): little-endian on both sides (IOP MIPS and PC server are
  * both little-endian, no network-byte-order conversion for THIS header -
@@ -204,6 +202,8 @@ static uint16_t g_data_port = 0; /* discovered via DISCOVERY/INFORM, see udpfs_d
  * (discovery only) via broadcast. */
 static uint32_t g_server_ip = 0;
 static int      g_server_fixed = 0;
+/* Diagnostics: why a reply was not accepted (printed when a request fails). */
+static volatile int g_dbg_rx_data, g_dbg_drop_seq, g_dbg_drop_port;
 static uint8_t  g_server_mac[6];
 static volatile int g_server_mac_ok = 0;
 static int g_unicast_off = 0;      /* 1 = unicast never got a reply: Ethernet broadcast only */
@@ -256,11 +256,12 @@ static volatile int g_nack_seq = -1;      /* CLIENT seq that the server declares
 static uint16_t g_rx_srv_seq = 0;         /* seq_nr (server counter) of the reply, for the ACK */
 static uint16_t g_srv_next_seq = 0;       /* next server seq we expect: needed for the NACK.
                                            * The server starts from 0 (new session or after ResetSession). */
+static int g_session_confirmed = 0;   /* 1 once the server has answered at least one request of this session */
 static uint16_t g_tx_seq_nr = 0; /* OUTGOING sequence counter: must be incremented at every
                                    * DATA packet after the first OPEN_REQ, otherwise the server
                                    * treats a repeated seq_nr as an already-seen duplicate instead
                                    * of a new request (server log: "got previous packet
-                                   * 0 (expected 1), acking" — the READ_REQ was ignored) */
+                                   * 0 (expected 1), acking" — the request was ignored) */
 
 /* Clock with 1 s resolution, incremented by the client's own alarm
  * (udpfs_tick_start / udpfs_tick_cb, further below). */
@@ -313,31 +314,6 @@ static iop_sys_clock_t g_tick_clock;
  * derived from it, one second every 10). */
 static volatile uint32_t g_tick_ds = 0;
 
-#ifdef UDPFS_STATS
-/* Diagnostic build: the alarm runs at 1 ms and also provides a
- * millisecond clock to measure the duration of requests and reads. */
-static volatile uint32_t g_tick_ms = 0;
-static uint32_t g_tick_ms_sub = 0;
-
-static unsigned int udpfs_tick_cb(void *arg)
-{
-    (void)arg;
-    g_tick_ms++;
-    if ((g_tick_ms % 100) == 0)
-        g_tick_ds++;
-    if (++g_tick_ms_sub >= 1000) {
-        g_tick_ms_sub = 0;
-        g_tick_s++;
-    }
-    return g_tick_clock.lo;
-}
-
-static void udpfs_tick_start(void)
-{
-    USec2SysClock(1000, &g_tick_clock);
-    SetAlarm(&g_tick_clock, udpfs_tick_cb, NULL);
-}
-#else
 static unsigned int udpfs_tick_cb(void *arg)
 {
     (void)arg;
@@ -351,7 +327,6 @@ static void udpfs_tick_start(void)
     USec2SysClock(100000, &g_tick_clock);
     SetAlarm(&g_tick_clock, udpfs_tick_cb, NULL);
 }
-#endif
 
 /* ACK (is_ack=1: seq_nr_ack = last server seq received) or NACK
  * (is_ack=0: seq_nr_ack = expected server seq) sent by the receive
@@ -627,13 +602,18 @@ static int udpfs_rx_handler(udp_socket_t *socket, uint16_t pointer, void *arg)
 
     /* The reply to a request carries the client's seq in seq_nr_ack. */
     seq_ack = (int)data.f.seq_nr_ack;
-    if (g_waiting_seq < 0 || seq_ack != g_waiting_seq)
+    g_dbg_rx_data++;
+    if (g_waiting_seq < 0 || seq_ack != g_waiting_seq) {
+        g_dbg_drop_seq++;
         return -1;
+    }
     if (g_reply_seq == seq_ack)
         return -1; /* retransmission of an already completed reply */
 
-    if (g_data_port == 0 || src_port != g_data_port)
+    if (g_data_port == 0 || src_port != g_data_port) {
+        g_dbg_drop_port++;
         return -1;
+    }
 
     /* BREAD in progress: multi-packet reply, directly into the
      * caller's destination. */
@@ -773,6 +753,7 @@ static int udpfs_discover(uint32_t timeout_us)
                g_server_mac_ok ? " (unicast)" : " (Ethernet broadcast)");
     else
         printf("UDPFS: no INFORM accepted after %d DISCOVERY packets (INFORMs seen: %d)\n", ntries, (int)g_dbg_inform_seen);
+    printf("%s\n", udpfs_stash_diag);
     printf("%s\n", udpfs_cfg_diag);
     printf("%s\n", udpfs_cfg_diag2);
 
@@ -920,122 +901,6 @@ static void udpfs_send_nack(void)
     udp_packet_send(g_socket, (udp_packet_t *)&nack.hdr, sizeof(nack.base) + sizeof(nack.data));
 }
 
-#ifdef UDPFS_STATS
-/* ------------------------------------------------------------------ */
-/* Live statistics (only -DUDPFS_STATS, see Makefile).
- *
- * Once per second, at the end of a POPStarter read, the client sends the
- * server a GETSTAT whose "path" is the summary of the second just elapsed;
- * with the server in -verbose it appears in its log:
- *   GETSTAT "UDPFS_STATS t=412 c=150 b=307200 ms=2048 cmax=9 cavg=2 sc=0 r=450 rmax=4 sr=0 rt=0 rs=0 f=0": -5
- *   t    tick in seconds (a gap = no read completed in that time)
- *   c    POPStarter read calls (udpfs_stub_read)
- *   b    bytes delivered;   ms  maximum size requested in one call
- *   cmax maximum duration of a call (ms);  cavg average duration (ms)
- *   sc   calls longer than UDPFS_STATS_SLOW_CALL_MS
- *   r    completed network requests (including the report GETSTATs)
- *   rmax maximum duration of a request (ms)
- *   sr   requests longer than UDPFS_STATS_SLOW_REQ_MS
- *   gmax maximum pause (ms) between the end of a read call and the start
- *        of the next;  gavg average pause: time during which POPStarter is
- *        not waiting for this module
- *   rt   retransmissions (requests that needed more than one
- *        attempt);  rs  seq resynchronizations;  f  failed requests
- * Resolution 1 ms. The report GETSTAT is one extra request per
- * second, negligible but not zero. */
-#ifndef UDPFS_STATS_SLOW_REQ_MS
-#define UDPFS_STATS_SLOW_REQ_MS 5
-#endif
-#ifndef UDPFS_STATS_SLOW_CALL_MS
-#define UDPFS_STATS_SLOW_CALL_MS 20
-#endif
-
-static uint32_t st_reqs, st_req_max, st_req_slow, st_retry, st_resync, st_fail;
-static uint32_t st_calls, st_bytes, st_maxsz, st_call_max, st_call_sum, st_call_slow;
-static uint32_t st_last_tick;
-static uint32_t st_last_end, st_have_end, st_gap_max, st_gap_sum, st_gap_n;
-uint32_t udpfs_stats_now_ms(void)
-{
-    return g_tick_ms;
-}
-
-static void udpfs_stats_req_end(uint32_t t0, int ok, int attempt, int resynced)
-{
-    uint32_t dur = g_tick_ms - t0;
-
-    if (!ok) {
-        st_fail++;
-        return;
-    }
-    st_reqs++;
-    if (dur > st_req_max)
-        st_req_max = dur;
-    if (dur > UDPFS_STATS_SLOW_REQ_MS)
-        st_req_slow++;
-    if (attempt > 0)
-        st_retry++;
-    if (resynced)
-        st_resync++;
-}
-
-void udpfs_stats_read_done(uint32_t t0, uint32_t size, uint32_t got)
-{
-    uint32_t dur = g_tick_ms - t0;
-    uint32_t tick = g_tick_s;
-
-    /* pause between the end of the previous call and the start of this one: it is
-     * the time during which POPStarter is NOT waiting for this module */
-    if (st_have_end) {
-        uint32_t gap = t0 - st_last_end;
-
-        if (gap > st_gap_max)
-            st_gap_max = gap;
-        st_gap_sum += gap;
-        st_gap_n++;
-    }
-
-    st_calls++;
-    st_bytes += got;
-    if (size > st_maxsz)
-        st_maxsz = size;
-    if (dur > st_call_max)
-        st_call_max = dur;
-    st_call_sum += dur;
-    if (dur > UDPFS_STATS_SLOW_CALL_MS)
-        st_call_slow++;
-
-    if (tick != st_last_tick) {
-        char msg[200];
-        udpfs_stat_t st;
-        uint32_t cavg = st_calls ? st_call_sum / st_calls : 0;
-
-        sprintf(msg, "UDPFS_STATS t=%u c=%u b=%u ms=%u cmax=%u cavg=%u sc=%u r=%u rmax=%u sr=%u rt=%u rs=%u f=%u gmax=%u gavg=%u",
-                (unsigned)tick, (unsigned)st_calls, (unsigned)st_bytes, (unsigned)st_maxsz,
-                (unsigned)st_call_max, (unsigned)cavg, (unsigned)st_call_slow,
-                (unsigned)st_reqs, (unsigned)st_req_max, (unsigned)st_req_slow,
-                (unsigned)st_retry, (unsigned)st_resync, (unsigned)st_fail,
-                (unsigned)st_gap_max, (unsigned)(st_gap_n ? st_gap_sum / st_gap_n : 0));
-        if (strlen(msg) > 120) /* the path of a GETSTAT must stay under 128 bytes */
-            msg[120] = 0;
-
-        st_last_tick = tick;
-        st_calls = st_bytes = st_maxsz = st_call_max = st_call_sum = st_call_slow = 0;
-        st_reqs = st_req_max = st_req_slow = st_retry = st_resync = st_fail = 0;
-        st_gap_max = st_gap_sum = st_gap_n = 0;
-
-        udpfs_client_getstat(msg, &st); /* the report is the path: the server logs it */
-    }
-
-    st_last_end = g_tick_ms;   /* after the report, if any: does not count as a POPStarter pause */
-    st_have_end = 1;
-}
-#define ST_DECL()          uint32_t st_t0 = g_tick_ms
-#define ST_REQ_END(ok)    udpfs_stats_req_end(st_t0, (ok), attempt, resynced)
-#else
-#define ST_DECL()          ((void)0)
-#define ST_REQ_END(ok)    ((void)0)
-#endif
-
 /* Sends 'payload' as a DATA packet
  * with FIN=1 and waits for the reply (data in g_rx_*). 'timeout_us' is the
  * timeout of the first attempt, see above. Returns 0 if the reply arrived,
@@ -1046,7 +911,6 @@ static int udpfs_send_and_wait(const void *payload, uint16_t payload_len, uint32
     uint16_t total, padded;
     uint16_t this_seq;
     int attempt, max_attempts, got = 0, resynced = 0, probed = 0;
-    ST_DECL();
 
     if (g_net_failed)
         return -1;
@@ -1144,6 +1008,7 @@ static int udpfs_send_and_wait(const void *payload, uint16_t payload_len, uint32
                 printf("UDPFS: server restarted (data port %d -> %d), new session\n", (int)old_port, (int)g_data_port);
                 this_seq        = 0;
                 g_tx_seq_nr     = 1;
+                g_session_confirmed = 0;
                 g_srv_next_seq  = 0;
                 g_fail_streak   = 0;
                 udpfs_pkt_init((udp_packet_t *)&pkt.hdr, g_data_port);
@@ -1177,6 +1042,22 @@ static int udpfs_send_and_wait(const void *payload, uint16_t payload_len, uint32
             g_server_mac_ok = 0;
             memset(((udp_packet_t *)&pkt.hdr)->eth.addr_dst, 0xff, 6);
             printf("UDPFS: no reply to unicast, falling back to Ethernet broadcast\n");
+        }
+
+        /* First request of a session without any reply: the server may have
+         * already processed ONE packet with seq 0 of a previous session (it
+         * then expects seq 1) and takes our new seq 0 for a duplicate: it only
+         * ACKs it and never runs it (the peer-reset detection of the server
+         * needs an expected seq other than 1). Retry as seq 1, which the
+         * server accepts in that case. If the server was fresh and simply
+         * lost the reply, running the (idempotent) request twice is harmless. */
+        if (attempt == 1 && this_seq == 0 && !g_session_confirmed && !resynced) {
+            this_seq    = 1;
+            g_tx_seq_nr = 2;
+            pkt.base.f.seq_nr = 1;
+            g_reply_seq = -1;
+            COMPILER_BARRIER();
+            g_waiting_seq = this_seq;
         }
 
         if (attempt > 0)
@@ -1245,13 +1126,14 @@ static int udpfs_send_and_wait(const void *payload, uint16_t payload_len, uint32
             g_disc_backoff = 0;
             g_rediscover = 1;
         }
-        ST_REQ_END(0);
+        printf("UDPFS: req seq %d failed: rx %d dseq %d dport %d port %d mac %d\n", (int)this_seq,
+               g_dbg_rx_data, g_dbg_drop_seq, g_dbg_drop_port, (int)g_data_port, g_server_mac_ok);
         return -1;
     }
     g_fail_streak = 0;
+    g_session_confirmed = 1;
     if (g_server_mac_ok)
         g_mac_proven = 1;
-    ST_REQ_END(1);
 
     /* The server numbers its own packets independently: the next one we
      * expect (for a possible NACK) is the one after the reply. */
@@ -1315,13 +1197,13 @@ static void udpfs_unlock(void)
 static int udpfs_client_open_nl(const char *path, uint32_t *out_size)
 {
     /* static, same reason as pkt in udpfs_send_and_wait */
-    static uint8_t buf[8 + 128];
+    static uint8_t buf[8 + UDPFS_MAX_PATH];
     struct udpfs_open_req *req = (struct udpfs_open_req *)buf;
     uint32_t path_len;
     struct udpfs_open_reply *reply;
 
     path_len = strlen(path);
-    if (path_len >= 128)
+    if (path_len >= UDPFS_MAX_PATH)
         return -1;
 
     req->msg_type = UDPFS_MSG_OPEN_REQ;
@@ -1444,11 +1326,11 @@ static int udpfs_client_close_nl(int handle)
 
 static int udpfs_client_getstat_nl(const char *path, udpfs_stat_t *st)
 {
-    static uint8_t buf[4 + 128];
+    static uint8_t buf[4 + UDPFS_MAX_PATH];
     struct udpfs_getstat_reply *reply;
     uint32_t path_len = strlen(path);
 
-    if (path_len >= 128)
+    if (path_len >= UDPFS_MAX_PATH)
         return -1;
 
     buf[0] = UDPFS_MSG_GETSTAT_REQ;

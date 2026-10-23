@@ -9,6 +9,7 @@
  * see udpfs_stub.h for the purpose.
  */
 #include <errno.h>
+#include <stdio.h>
 #include <intrman.h>
 #include <iomanX.h>
 #include <sysclib.h>
@@ -24,7 +25,13 @@ typedef struct {
     int server_handle;   /* handle assigned by the server via OPEN_REQ */
     unsigned int position; /* logical file position: lseek updates it locally only */
     unsigned int size;   /* real file size (from OPEN_REPLY; 0 if unknown) */
-    char path[128];      /* to reopen the file if the server was restarted */
+    char path[UDPFS_MAX_PATH]; /* to reopen the file if the server was restarted */
+    /* One-sector cache for unaligned reads: the tail sector of a read is
+     * the head sector of the next sequential one. cache_n = bytes the
+     * server returned for cache_sector (0..512), -1 = empty. */
+    uint32_t cache_sector;
+    int cache_n;
+    uint8_t cache_buf[512] __attribute__((aligned(4)));
 } udpfs_stub_slot_t;
 
 static udpfs_stub_slot_t g_slots[UDPFS_STUB_MAX_HANDLES];
@@ -42,35 +49,17 @@ static int udpfs_ci_prefix(const char *s, const char *prefix)
     return 1;
 }
 
-int udpfs_stub_path_matches(const char *name)
+/* POPStarter: POPS/<x>.VCD and POPS0/ ... POPS9/<x>.VCD ("name" has no
+ * leading slashes). Only one character after "POPS": either the slash
+ * right away, or a digit followed by the slash - no other case (e.g.
+ * "POPSTARTER/" must not match). */
+static int __attribute__((unused)) udpfs_match_pops(const char *name, size_t len)
 {
-    size_t len;
     size_t prefix_len;
 
-    if (name == NULL)
+    if (len < 4 || !udpfs_ci_prefix(name, "POPS"))
         return 0;
 
-    /* "/POPS/X.VCD", "POPS/X.VCD" and upper/lower case variants:
-     * the exact format in which POPStarter passes the path is not
-     * guaranteed, and the comparison used to be case-sensitive and
-     * required exactly one leading slash. The path sent to the server
-     * remains the original one passed by fs_open/fs_getstat: the
-     * server itself strips the leading slashes (resolvePath). */
-    while (*name == '/')
-        name++;
-
-    len = strlen(name);
-    if (len < 4)
-        return 0;
-
-    if (!udpfs_ci_prefix(name, "POPS"))
-        return 0;
-
-    /* The folders POPStarter scans at startup: POPS/, and the numbered
-     * variants POPS0/ ... POPS9/ (multi-disc / alternate slots). Only
-     * one character after "POPS": either the slash right away, or a
-     * digit followed by the slash - no other case (e.g. "POPSTARTER/"
-     * must not match). */
     if (name[4] == '/') {
         prefix_len = 5; /* "POPS/" */
     } else if (len >= 6 && name[4] >= '0' && name[4] <= '9' && name[5] == '/') {
@@ -83,6 +72,73 @@ int udpfs_stub_path_matches(const char *name)
         return 0;
 
     return udpfs_ci_prefix(name + len - 4, ".VCD");
+}
+
+/* Ember: EMBER/games/<folder>/<file>.cue or <file>.bin, exactly one folder
+ * level. Any .cue/.bin in the folder is accepted (CDs with several bins);
+ * nothing else (settings.txt, bios.bin one level up, *.vmc, ...), so that
+ * optional files never cost a network round trip. "." and ".." as folder
+ * name are refused. */
+static int __attribute__((unused)) udpfs_match_ember(const char *name, size_t len)
+{
+    const char *folder, *file, *slash;
+    size_t folder_len, file_len;
+
+    if (!udpfs_ci_prefix(name, "EMBER/GAMES/"))
+        return 0;
+
+    folder = name + 12;
+    slash  = folder;
+    while (*slash && *slash != '/')
+        slash++;
+    if (*slash != '/')
+        return 0;                    /* no file part */
+
+    folder_len = (size_t)(slash - folder);
+    if (folder_len == 0 ||
+        (folder_len == 1 && folder[0] == '.') ||
+        (folder_len == 2 && folder[0] == '.' && folder[1] == '.'))
+        return 0;
+
+    file     = slash + 1;
+    file_len = len - (size_t)(file - name);
+    if (file_len < 5)                /* at least "x.cue" / "x.bin" */
+        return 0;
+    {
+        size_t k;
+        for (k = 0; k < file_len; k++)
+            if (file[k] == '/')
+                return 0;            /* deeper than one folder level */
+    }
+
+    return udpfs_ci_prefix(file + file_len - 4, ".CUE") ||
+           udpfs_ci_prefix(file + file_len - 4, ".BIN");
+}
+
+int udpfs_stub_path_matches(const char *name)
+{
+    size_t len;
+
+    if (name == NULL)
+        return 0;
+
+    /* The exact format in which the emulator passes the path is not
+     * guaranteed: upper/lower case variants and leading slashes are
+     * accepted. The path sent to the server remains the original one
+     * passed by fs_open/fs_getstat: the server itself strips the leading
+     * slashes (resolvePath). */
+    while (*name == '/')
+        name++;
+
+    len = strlen(name);
+
+    /* One rule per build: POPStarter by default, Ember with make EMBER=1.
+     * The other program's files never cause a network request. */
+#ifdef EMBER_BUILD
+    return udpfs_match_ember(name, len);
+#else
+    return udpfs_match_pops(name, len);
+#endif
 }
 
 
@@ -98,6 +154,7 @@ void *udpfs_stub_open(const char *path)
      * POPStarter, exactly as the original driver does when the file
      * does not exist. */
     handle = udpfs_client_open(path, &size);
+    printf("UDPFS: open -> %d size %u\n", handle, (unsigned)size);
     if (handle < 0)
         return NULL;
 
@@ -116,6 +173,7 @@ void *udpfs_stub_open(const char *path)
                 g_slots[i].server_handle = handle;
                 g_slots[i].position      = 0;
                 g_slots[i].size          = size;
+                g_slots[i].cache_n       = -1;
                 {
                     int k;
                     for (k = 0; k < (int)sizeof(g_slots[i].path) - 1 && path[k]; k++)
@@ -151,7 +209,7 @@ int udpfs_stub_is_ours(void *privdata)
  * The aligned part (position and size multiples of 512: all reads in the
  * tracks, 37888 and 38400 bytes) goes directly into the caller's buffer,
  * one request every 64 KB. Unaligned reads (VCD header at open:
- * 4/48/32/64 bytes) go through a bounce sector: head and tail are read
+ * 4/48/32/64 bytes) go through the slot's one-sector cache: head and tail are read
  * with a whole sector and only the requested bytes are copied. At end of
  * file the sectors are short: only what is there is copied. */
 /* Reopens the file after the server restart: the old handle no longer exists.
@@ -185,50 +243,47 @@ static int stub_bread(udpfs_stub_slot_t *slot, uint32_t sector, uint32_t count, 
     return n;
 }
 
-static int stub_bread_copy(udpfs_stub_slot_t *slot, unsigned int pos, uint8_t *bounce, uint8_t *out, int want)
+/* Copies up to 'want' bytes starting at 'pos' (inside one sector) through
+ * the slot's one-sector cache: a request is sent only if the sector is not
+ * the cached one. */
+static int stub_bread_copy(udpfs_stub_slot_t *slot, unsigned int pos, uint8_t *out, int want)
 {
     unsigned int off = pos & 511;
-    int n = stub_bread(slot, pos >> 9, 1, bounce);
-    int take;
+    uint32_t sector = pos >> 9;
+    int n, take;
+
+    if (slot->cache_n >= 0 && slot->cache_sector == sector) {
+        n = slot->cache_n;
+    } else {
+        n = stub_bread(slot, sector, 1, slot->cache_buf);
+        if (n < 0) {
+            slot->cache_n = -1;
+            return 0;           /* error */
+        }
+        slot->cache_sector = sector;
+        slot->cache_n      = n;
+    }
 
     if (n <= (int)off)
-        return 0;               /* error or past the end of the file */
+        return 0;               /* past the end of the file */
     take = n - (int)off;
     if (take > want)
         take = want;
-    memcpy(out, bounce + off, (size_t)take);
+    memcpy(out, slot->cache_buf + off, (size_t)take);
     return take;
 }
 
 int udpfs_stub_read(void *privdata, void *buffer, int size)
 {
     udpfs_stub_slot_t *slot = (udpfs_stub_slot_t *)privdata;
-    uint8_t bounce[512] __attribute__((aligned(4)));
     uint8_t *out = (uint8_t *)buffer;
     unsigned int pos = slot->position;
     int total = 0;
     int n;
-#ifdef UDPFS_STATS
-    uint32_t st_t0 = udpfs_stats_now_ms();
-#endif
 
     if (size <= 0) {
         goto done;
     }
-
-#ifdef UDPFS_STATS
-    if ((pos & 511) != 0 || ((unsigned int)size & 511) != 0) {
-        static unsigned reported;
-        udpfs_stat_t st;
-        char msg[64];
-
-        if (reported < 20) {   /* the first 20 are enough to see the pattern */
-            reported++;
-            sprintf(msg, "UDPFS_UNAL pos=%u size=%d", pos, size);
-            udpfs_client_getstat(msg, &st);
-        }
-    }
-#endif
 
     /* head: up to the next sector boundary */
     if (pos & 511) {
@@ -236,7 +291,7 @@ int udpfs_stub_read(void *privdata, void *buffer, int size)
 
         if (want > size)
             want = size;
-        n = stub_bread_copy(slot, pos, bounce, out, want);
+        n = stub_bread_copy(slot, pos, out, want);
         total += n;
         pos += (unsigned int)n;
         if (n < want)
@@ -260,16 +315,13 @@ int udpfs_stub_read(void *privdata, void *buffer, int size)
 
     /* tail: less than one sector */
     if (size - total > 0) {
-        n = stub_bread_copy(slot, pos, bounce, out + total, size - total);
+        n = stub_bread_copy(slot, pos, out + total, size - total);
         total += n;
         pos += (unsigned int)n;
     }
 
 done:
     slot->position = pos;
-#ifdef UDPFS_STATS
-    udpfs_stats_read_done(st_t0, (uint32_t)(size > 0 ? size : 0), (uint32_t)total);
-#endif
     return total;
 }
 
@@ -323,8 +375,25 @@ int udpfs_stub_getstat(const char *path, iox_stat_t *stat)
      * value: the real size is needed because POPS computes the CD-ROM
      * sector offsets from it. */
     res = udpfs_client_getstat(path, &st);
-    if (res < 0)
+
+    /* The Go server (udpfsd) answers -EIO to GETSTAT of a file that is not
+     * open (Ember calls getstat on the .bin before opening it). Ask with
+     * OPEN + CLOSE instead: if the file is really missing the OPEN fails
+     * too and the original error is returned. Network errors (-1) and
+     * other server errors (e.g. -ENOENT) are not retried. */
+    if (res == -EIO) {
+        uint32_t size = 0;
+        int handle = udpfs_client_open(path, &size);
+
+        if (handle < 0)
+            return res;
+        udpfs_client_close(handle);
+        memset(&st, 0, sizeof(st));
+        st.size = size;
+        res = 0;
+    } else if (res < 0) {
         return res;
+    }
 
     memset(stat, 0, sizeof(*stat));
     stat->mode   = FIO_S_IROTH | FIO_S_IXOTH | FIO_S_IFREG; /* read-only, by design */

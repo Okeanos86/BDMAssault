@@ -23,6 +23,11 @@
 
 #define UDPFS_PORT        0xF5F6
 
+/* Size of a path buffer, terminating NUL included: paths up to 255
+ * characters. An OPEN/GETSTAT request (path + 8 bytes) must fit in the
+ * 512-byte payload of a single packet. */
+#define UDPFS_MAX_PATH    256
+
 /* Stat of a remote file (from GETSTAT_REPLY). */
 typedef struct {
     uint32_t mode;
@@ -34,12 +39,6 @@ typedef struct {
     uint8_t  mtime[8];
 } udpfs_stat_t;
 
-
-#ifdef UDPFS_STATS
-/* Live statistics (diagnostic build, see net_udpfs_client.c). */
-uint32_t udpfs_stats_now_ms(void);
-void udpfs_stats_read_done(uint32_t t0_ms, uint32_t size, uint32_t got);
-#endif
 
 /* Fixed server IP (from UDPFSCONFIG.DAT). Without this call the server
  * is looked up with a broadcast DISCOVERY. Call before udpfs_client_init. */

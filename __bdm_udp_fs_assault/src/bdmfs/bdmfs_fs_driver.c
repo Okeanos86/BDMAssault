@@ -328,9 +328,10 @@ static int fs_open(iop_file_t *fd, const char *name, int flags, int mode)
 
     /* --- UDPFS fallback (read-only) ---
      * We only get here if the open on the USB drive failed (file missing,
-     * drive not mounted, etc.) and the request was read-only on a
-     * POPS/POPSx/*.VCD file: it is the only case where paying the cost
-     * (seconds) of a network request is worth it. No
+     * drive not mounted, etc.) and the request was read-only on a path the
+     * build's rule accepts (POPStarter: POPS/ and POPS0..9/ <name>.VCD;
+     * Ember: EMBER/games/<folder>/<name>.cue or .bin): it is the only case
+     * where paying the cost (seconds) of a network request is worth it. No
      * O_WRONLY/O_CREAT/O_TRUNC/O_APPEND: the fallback is read-only by
      * design, the server would refuse writes anyway.
      * If the server does not have the file either, the original FatFs

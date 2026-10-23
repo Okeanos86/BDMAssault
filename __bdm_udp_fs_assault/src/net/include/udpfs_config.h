@@ -9,25 +9,39 @@
 
 #include <stdint.h>
 
-/* Configuration from the USB drive (the "mass" driver of this module), folder
- * POPS, read after the drive is mounted.
+/* Configuration, in order of priority: the memory card (IPCONFIG.DAT in
+ * mc?:/SYS-CONF/, UDPFSCONFIG.DAT in mc?:/SYS-CONF/, mc0: then mc1:; see
+ * net_udpfs_stash.c) and the USB drive (the "mass"
+ * driver of this module), folder SYS-CONF, read after the drive is mounted. Each
+ * file is looked up separately: what the card does not provide is read from
+ * the USB drive. The USB paths below are the ones the reader receives.
  *
  *  IPCONFIG.DAT   PS2 IP, one line:  "IP NETMASK [GATEWAY]"
  *                 e.g. "192.168.1.10 255.255.255.0 192.168.1.1"
- *                 File: mass:/POPS/IPCONFIG.DAT. An unreadable or invalid
+ *                 File: mass:/SYS-CONF/IPCONFIG.DAT. An unreadable or invalid
  *                 file is treated as missing.
  *                 If no file is valid the default IP is used:
  *                 192.168.1.10 / 255.255.255.0 (like UDPBD and Neutrino).
  *  UDPFSCONFIG.DAT  Server IP, e.g. "192.168.1.11". File:
- *                 mass:/POPS/UDPFSCONFIG.DAT. If present it takes
+ *                 mass:/SYS-CONF/UDPFSCONFIG.DAT. If present it takes
  *                 precedence over broadcast; if missing (or not in the PS2's
  *                 subnet) the server is looked up with a broadcast DISCOVERY.
  *
  * The gateway is read but not used: the ministack does no routing, the
  * server must be on the same network segment. */
 
-#define UDPFS_CFG_IPCONFIG_PATH "mass:/POPS/IPCONFIG.DAT"
-#define UDPFS_CFG_SERVER_PATH   "mass:/POPS/UDPFSCONFIG.DAT"
+/* USB drive fallback, the same folder for the POPStarter and the Ember build.
+ * On the FAT/exFAT drive the folder name is not case sensitive. */
+#define UDPFS_CFG_IPCONFIG_PATH "mass:/SYS-CONF/IPCONFIG.DAT"
+#define UDPFS_CFG_SERVER_PATH   "mass:/SYS-CONF/UDPFSCONFIG.DAT"
+
+/* The same files on the memory card (like POPStarter's SMB mode), read in the
+ * first load of the module and carried over the IOP reset in IOP RAM (see
+ * net_udpfs_stash.c). They have priority over the USB drive. */
+#define UDPFS_CFG_MC0_IPCONFIG_PATH "mc0:/SYS-CONF/IPCONFIG.DAT"
+#define UDPFS_CFG_MC1_IPCONFIG_PATH "mc1:/SYS-CONF/IPCONFIG.DAT"
+#define UDPFS_CFG_MC0_SERVER_PATH   "mc0:/SYS-CONF/UDPFSCONFIG.DAT"
+#define UDPFS_CFG_MC1_SERVER_PATH   "mc1:/SYS-CONF/UDPFSCONFIG.DAT"
 
 #define UDPFS_DEFAULT_PS2_IP   0xC0A8010Au   /* 192.168.1.10 */
 #define UDPFS_DEFAULT_PS2_MASK 0xFFFFFF00u   /* 255.255.255.0 */
@@ -54,6 +68,14 @@ int udpfs_cfg_load_server(udpfs_cfg_read_fn rd, uint32_t *ip, const char **where
 /* Real read through ioman (USB drive, "mass:" driver). */
 int udpfs_cfg_read_file_iop(const char *path, char *buf, int size);
 
+#ifndef UDPFS_CFG_HOST
+/* net_udpfs_stash.c: call once, early in _start, before anything else. */
+void udpfs_stash_init(void);
+/* Reader for udpfs_config_apply: memory card data (stash) first, then USB. */
+int udpfs_cfg_read_stash_or_usb(const char *path, char *buf, int size);
+extern char udpfs_stash_diag[64];
+#endif
+
 /* Sets the PS2 IP (ministack) and, if present, the fixed server IP.
  * Always returns 0: without a valid IPCONFIG.DAT it uses the default IP. */
 int udpfs_config_apply(udpfs_cfg_read_fn rd);
@@ -69,6 +91,10 @@ extern char udpfs_cfg_diag2[64]; /* "UDPFS: server: ..." result of UDPFSCONFIG.D
 enum { UDPFS_M_START, UDPFS_M_MC, /* USB drive mounted */ UDPFS_M_IP, UDPFS_M_CFG, UDPFS_M_DEV9, UDPFS_M_SMAP, UDPFS_M_LINK, UDPFS_M_DISC, UDPFS_M_READY, UDPFS_M_COUNT };
 void udpfs_mark(int id);
 void udpfs_marks_print(void);
+/* net_dbg.c: arguments the module was started with; printed together with
+ * the timings. */
+void udpfs_dbg_capture(int argc, char *argv[]);
+void udpfs_dbg_print(void);
 #define UDPFS_MARK(id) udpfs_mark(id)
 #else
 #define UDPFS_MARK(id) ((void)0)

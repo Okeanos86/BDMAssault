@@ -1,0 +1,10 @@
+// DEBUG builds with UDPFS_DBG_MODLIST=1 only (see Makefile): list the IOP
+// modules, used by net_dbg.c. These two functions come with export version
+// 1.3 of modload; the table asks for 1.3 only (xmodload_IMPORTS_start would
+// ask for 1.7, which older IOP images do not have).
+#include <xmodload.h>
+
+DECLARE_IMPORT_TABLE(modload, 1, 3)
+I_GetModuleIdList
+I_ReferModuleStatus
+END_IMPORT_TABLE
