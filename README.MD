@@ -1,8 +1,4 @@
-# BDM Assault
-
-BDM Assault is a homebrew project for PS2 that aims to bring EXFAT USB support to those old closed source homebrew apps that can load external USB drivers that people still use today (POPStarter, FreeMcBoot).
-
-## BDM-UDPFS Assault (fork)
+## BDM-UDPFS Assault
 
 This repository is a fork of [israpps/BDMAssault](https://github.com/israpps/BDMAssault). On top of the original project it adds [`__bdm_udp_fs_assault`](__bdm_udp_fs_assault/README.MD): a variant of the BDM driver for POPStarter that reads `.VCD` files from a UDPFS server over Ethernet when they are not found on the USB drive (read-only, network fallback). A second build (`make EMBER=1`) does the same for the Ember emulator (`.cue`/`.bin` files).
 
@@ -10,6 +6,10 @@ This repository is a fork of [israpps/BDMAssault](https://github.com/israpps/BDM
 - It works with the same `usbd_bd_assault.irx` built from this repository.
 - The original BDM Assault is unchanged and keeps working as described below.
 - Usage, network configuration and build options: see [`__bdm_udp_fs_assault/README.MD`](__bdm_udp_fs_assault/README.MD).
+
+## BDM Assault (original project)
+
+BDM Assault is a homebrew project for PS2 that aims to bring EXFAT USB support to those old closed source homebrew apps that can load external USB drivers that people still use today (POPStarter, FreeMcBoot)
 
 ## License
 
