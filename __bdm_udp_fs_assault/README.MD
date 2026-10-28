@@ -12,6 +12,7 @@ Original BDM Assault description: *PS2 homebrew project to bring support for EXF
 - If the file is not on the USB drive, the same path is requested from a UDPFS server over Ethernet and read with BREAD requests.
 - If neither has the file, the open fails exactly as with the original driver.
 - Any other file, and any write, never touches the network.
+- **BIN/CUE as a VCD (POPStarter build):** if `POPS/<game>.VCD` does not exist, either on the USB drive or on the server, but `POPS/<game>.cue` and the `.bin` file(s) it names do, the game is presented to POPStarter as a VCD built on the fly (1 MiB header generated in RAM, then the `.bin` files in cue order). The cue and bin files are read from the USB drive first, then from the server. No conversion and no extra file; a real `.VCD` always wins. Multi-bin Redump sets and audio tracks work; a cue with PREGAP/POSTGAP, a first track that is not MODE2/2352 or a missing `.bin` is not usable (the open fails as if there was no file). Not in the Ember build, which reads cue/bin itself.
 
 The `.VCD` extension must be uppercase (POPStarter is case-sensitive on this), on the USB drive and on the server.
 
@@ -32,8 +33,9 @@ Ember has its own build, `make EMBER=1`, which produces `bdm_udp_fs_assault_embe
 
 ### What goes where
 
-- **UDPFS server (POPStarter build):** only the `.VCD` files, in the folder POPStarter looks in, relative to the server's shared root: `/POPS/` or `/POPS0/` ... `/POPS9/` (for example `/POPS/Game Name.VCD`). The extension must be uppercase.
+- **UDPFS server (POPStarter build):** the `.VCD` files, in the folder POPStarter looks in, relative to the server's shared root: `/POPS/` or `/POPS0/` ... `/POPS9/` (for example `/POPS/Game Name.VCD`; the extension must be uppercase), or the `.cue` and `.bin` files of a game (see the BIN/CUE item below).
 - **UDPFS server (Ember build, `make EMBER=1`, output `bdm_udp_fs_assault_ember.irx`; the POPStarter build never requests these files):** the `.cue` and `.bin` files of a game, one folder per game: `/EMBER/games/<folder>/<name>.cue` and `.bin` (for example `/EMBER/games/Game Dir/Game Name.cue`). Any `.cue`/`.bin` in that folder is served, so CDs with several `.bin` tracks work. The `/EMBER/` folder itself (`settings.txt`, `bios.bin`, the virtual memory cards, which Ember writes) must stay on the USB drive.
+- **BIN/CUE games (POPStarter build):** `/POPS/<game>.cue` and the `.bin` files it names, in the same folder, on the USB drive or on the server (`.cue` or `.CUE` on the server; the file names inside the cue must match the real ones exactly on the server). Limits: cue sheet up to 16 KiB and up to 99 tracks/files, track 1 MODE2/2352, no PREGAP/POSTGAP commands, file sizes multiple of 2352, image smaller than 4 GiB. One `.bin` for the whole disc or one per track both work.
 - **USB drive:** everything else POPStarter needs (`POPS_IOX.PAK` and any other file) stays on the USB drive and is read from there. No additional file is needed on the server, and this module does not read any other file from the network.
 
 ### Any other homebrew

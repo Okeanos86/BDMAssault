@@ -11,6 +11,15 @@ IOP_CFLAGS += -I../libbdm/include/ -Wno-strict-aliasing
 BDMFS_FATFS_OBJS = ff.o ffsystem.o ffunicode.o fs_driver.o diskio.o main.o udpfs_stub.o
 IOP_LIBS += -static-libgcc -lgcc
 
+# A .cue + .bin file(s) as a POPStarter VCD, from the USB drive or from the
+# UDPFS server (src/bdmfs/bdmfs_vcd.h). Not in the Ember build: Ember reads
+# cue/bin itself. The largest cue sheet (VCD_CUE_MAX) and the room for all its
+# file names (VCD_NAMES_MAX) are set in src/bdmfs/vcd_cue.h, the same values as in
+# __udp_fs_assault (16384 / 8192 bytes, about 46 KB of static IOP RAM).
+ifneq ($(EMBER), 1)
+  BDMFS_FATFS_OBJS += vcd_cue.o vcd.o vcd_usb.o vcd_net.o
+endif
+
 #net (dev9 + smap + ministack + xfer + udptty, derived from UDPBD in the
 # Neutrino repository). Only the hardware/network layer is used: the UDPBD
 # block protocol is not included, UDPFS runs on top of it.

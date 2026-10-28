@@ -1227,7 +1227,7 @@ static int udpfs_client_open_nl(const char *path, uint32_t *out_size)
     }
 
     if (reply->msg_type != UDPFS_MSG_OPEN_REPLY || reply->handle < 0)
-        return -1;
+        return -2;      /* the server answered: it refused (no such file...) */
 
     if (out_size)
         *out_size = reply->size;

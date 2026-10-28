@@ -77,12 +77,39 @@ in a row, the data port is forgotten and the next request performs the
 discovery again.
 
 
+BIN/CUE as a VCD (POPStarter build)
+-----------------------------------
+If POPS/<game>.VCD does not exist, on the USB drive or on the server, the
+module looks for POPS/<game>.cue (the server also tries .CUE) and builds the VCD
+on the fly: a 1 MiB header generated in RAM (only the first 0x410 bytes are
+meaningful, the rest reads as zeros) followed by the .bin file(s) named in the
+cue, in cue order. The .cue and .bin files are read from the USB drive first,
+then from the server. A real .VCD always takes precedence. Not in the Ember
+build, which reads cue/bin itself.
+
+- One .bin for the whole disc, or one .bin per track (Redump), both work.
+- Limits: cue sheet up to 16 KiB (VCD_CUE_MAX), file names of all the .bin files
+  up to 8 KiB together (VCD_NAMES_MAX), up to 99 tracks and files, track 1
+  MODE2/2352, no PREGAP/POSTGAP commands, every track with INDEX 01, file
+  sizes multiple of 2352, times up to 95 minutes, image smaller than 4 GiB.
+  The two sizes are set in src/bdmfs/vcd_cue.h (static IOP RAM, about 46 KB).
+- The module opens every .bin once at game start to learn its size (about
+  10 ms per file on the server); the first one stays open. Up to 3 .bin files
+  are kept open at the same time and the least recently used one is closed.
+- On the USB drive the files are read through FatFs at any offset. On the
+  server the reads are BREAD requests; the files after the first one are not
+  aligned to 512 bytes, so each POPStarter request costs 3 BREADs.
+- If the server is restarted during a game, the files are reopened by path.
+
+
 Ember build (make EMBER=1)
 --------------------------
 Two builds exist, one per program:
 
     make               POPStarter build (bdm_udp_fs_assault.irx): UDPFS is
-                       used only for POPS/ and POPS0/ ... POPS9/ *.VCD files.
+                       used only for POPS/ and POPS0/ ... POPS9/ *.VCD files
+                       and, when there is no .VCD, for the .cue and .bin files
+                       of the game (see "BIN/CUE as a VCD" above).
     make EMBER=1       Ember build (bdm_udp_fs_assault_ember.irx; with DEBUG=1
                        bdm_udp_fs_assault_ember_debug.irx): UDPFS is used only
                        for EMBER/games/<folder>/<name>.cue and <name>.bin
@@ -215,6 +242,10 @@ After changing a build knob (DEBUG, TTY, EMBER) run "make clean".
 
 Changelog
 ---------
+- POPStarter build: a .cue + .bin set (one .bin or one per track) is presented
+  as a VCD when there is no .VCD, from the USB drive or from the server (see
+  "BIN/CUE as a VCD"). After a server restart, cached handles that may belong
+  to other files are dropped instead of being trusted.
 - Removed the UDPFS_STATS diagnostic build option (live statistics sent as fake
   GETSTAT requests); DEBUG and TTY remain.
 - First request of a session: if the server does not answer seq 0 (it may take it
@@ -232,7 +263,8 @@ Changelog
   session restart, reopen by path if the handle is no longer valid.
 - Reads: BREAD only, with a one-sector cache for unaligned head/tail.
 - Ember support: make EMBER=1 build, UDPFS used for EMBER/games/<folder>/
-  *.cue and *.bin (the POPStarter build keeps POPS/ *.VCD only); GETSTAT
+  *.cue and *.bin (the POPStarter build uses POPS/ *.VCD, or a .cue + .bin set
+  presented as a VCD); GETSTAT
   answered -5 by the Go server is retried with OPEN + CLOSE; paths up to 255
   characters.
 - net_ministack.c: arp_add_entry() free-slot check fixed (no behavior change,

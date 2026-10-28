@@ -62,8 +62,9 @@ int udpfs_client_getstat(const char *path, udpfs_stat_t *st);
 void udpfs_client_init(void);
 
 /* Opens a remote file. Returns the handle assigned by the server (>= 0),
- * or a negative error. *out_size receives the file size if the
- * open succeeds. */
+ * -2 if the server answered with an error (for example the file does not
+ * exist) or -1 if there was no usable answer (network down, timeout).
+ * *out_size receives the file size if the open succeeds. */
 int udpfs_client_open(const char *path, uint32_t *out_size);
 
 /* 512-byte sector read (BREAD): 'count' sectors from 'sector'

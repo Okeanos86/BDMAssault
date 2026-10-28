@@ -26,6 +26,7 @@ typedef struct {
     unsigned int position; /* logical file position: lseek updates it locally only */
     unsigned int size;   /* real file size (from OPEN_REPLY; 0 if unknown) */
     char path[UDPFS_MAX_PATH]; /* to reopen the file if the server was restarted */
+    unsigned int epoch;  /* g_srv_epoch when server_handle was obtained */
     /* One-sector cache for unaligned reads: the tail sector of a read is
      * the head sector of the next sequential one. cache_n = bytes the
      * server returned for cache_sector (0..512), -1 = empty. */
@@ -35,6 +36,13 @@ typedef struct {
 } udpfs_stub_slot_t;
 
 static udpfs_stub_slot_t g_slots[UDPFS_STUB_MAX_HANDLES];
+
+/* Raised each time a slot finds out that the server was restarted (it
+ * answers "invalid handle"). A server that restarted has forgotten every
+ * handle and hands out the same numbers again to other files, so a slot
+ * whose epoch is older must not trust its handle: it reopens by path first
+ * (several slots are open at once when a VCD is made of several .bin files). */
+static unsigned int g_srv_epoch;
 
 /* Case-insensitive prefix comparison: "prefix" is UPPERCASE.
  * toupper is already imported via sysclib. */
@@ -142,7 +150,13 @@ int udpfs_stub_path_matches(const char *name)
 }
 
 
-void *udpfs_stub_open(const char *path)
+/* The open itself (one attempt, no retry). *err: 0, -ENOENT if the server
+ * answered that it has no such file (a network failure is -EIO, a full slot
+ * pool -EMFILE), so that a caller can tell "not there" from "not reachable".
+ * need_size: the size must be known (the open reply may carry 0, as the first
+ * instance of the module sees it): GETSTAT is asked for it, the file is open
+ * so the Go server answers too; without a size the open fails. */
+void *udpfs_stub_open_ex(const char *path, int need_size, int *err)
 {
     int i;
     int handle;
@@ -155,8 +169,24 @@ void *udpfs_stub_open(const char *path)
      * does not exist. */
     handle = udpfs_client_open(path, &size);
     printf("UDPFS: open -> %d size %u\n", handle, (unsigned)size);
-    if (handle < 0)
+    if (handle < 0) {
+        if (err)
+            *err = (handle == -2) ? -ENOENT : -EIO;
         return NULL;
+    }
+    if (need_size && size == 0) {
+        udpfs_stat_t st;
+
+        memset(&st, 0, sizeof(st));
+        if (udpfs_client_getstat(path, &st) == 0 && st.hisize == 0)
+            size = st.size;
+        if (size == 0) {
+            udpfs_client_close(handle);
+            if (err)
+                *err = -EIO;
+            return NULL;
+        }
+    }
 
     /* The slot scan must be protected: fs_open can be called from
      * several IOP threads, and in_use is read/written without any
@@ -167,6 +197,16 @@ void *udpfs_stub_open(const char *path)
         udpfs_stub_slot_t *found = NULL;
 
         CpuSuspendIntr(&OldState);
+        /* The server gave a number that a slot of ours still holds: it can
+         * only be because it was restarted and forgot that handle. Every
+         * older slot is stale from now on and reopens by path before its
+         * next read, instead of reading from this new file. */
+        for (i = 0; i < UDPFS_STUB_MAX_HANDLES; i++) {
+            if (g_slots[i].in_use && g_slots[i].epoch == g_srv_epoch && g_slots[i].server_handle == handle) {
+                g_srv_epoch++;
+                break;
+            }
+        }
         for (i = 0; i < UDPFS_STUB_MAX_HANDLES; i++) {
             if (!g_slots[i].in_use) {
                 g_slots[i].in_use        = 1;
@@ -174,6 +214,7 @@ void *udpfs_stub_open(const char *path)
                 g_slots[i].position      = 0;
                 g_slots[i].size          = size;
                 g_slots[i].cache_n       = -1;
+                g_slots[i].epoch         = g_srv_epoch;
                 {
                     int k;
                     for (k = 0; k < (int)sizeof(g_slots[i].path) - 1 && path[k]; k++)
@@ -186,15 +227,30 @@ void *udpfs_stub_open(const char *path)
         }
         CpuResumeIntr(OldState);
 
-        if (found != NULL)
+        if (found != NULL) {
+            if (err)
+                *err = 0;
             return found;
+        }
     }
 
     /* slot pool full: now that CLOSE_REQ exists (see below), we free
      * the handle on the server right away instead of leaving it open
      * until restart. */
     udpfs_client_close(handle);
+    if (err)
+        *err = -EMFILE;
     return NULL;
+}
+
+void *udpfs_stub_open(const char *path)
+{
+    return udpfs_stub_open_ex(path, 0, NULL);
+}
+
+unsigned int udpfs_stub_size(void *privdata)
+{
+    return ((udpfs_stub_slot_t *)privdata)->size;
 }
 
 int udpfs_stub_is_ours(void *privdata)
@@ -229,6 +285,7 @@ static int stub_reopen(udpfs_stub_slot_t *slot)
         return -1;
     }
     slot->server_handle = handle;
+    slot->epoch         = g_srv_epoch;
     return 0;
 }
 
@@ -236,10 +293,19 @@ static int stub_reopen(udpfs_stub_slot_t *slot)
  * (invalid handle), i.e. it is alive but no longer knows the file. */
 static int stub_bread(udpfs_stub_slot_t *slot, uint32_t sector, uint32_t count, void *buf)
 {
-    int n = udpfs_client_bread(slot->server_handle, sector, count, buf);
+    int n;
 
-    if (n == -2 && stub_reopen(slot) == 0)
-        n = udpfs_client_bread(slot->server_handle, sector, count, buf);
+    /* the server restarted since this handle was obtained (another slot
+     * noticed): its number may now belong to another file, so reopen first.
+     * The old handle is not closed: it is not ours any more. */
+    if (slot->epoch != g_srv_epoch && stub_reopen(slot) != 0)
+        return -1;
+    n = udpfs_client_bread(slot->server_handle, sector, count, buf);
+    if (n == -2) {
+        g_srv_epoch++;
+        if (stub_reopen(slot) == 0)
+            n = udpfs_client_bread(slot->server_handle, sector, count, buf);
+    }
     return n;
 }
 
@@ -361,7 +427,8 @@ int udpfs_stub_close(void *privdata)
      * prevent later opens of the same file. If the network does not
      * reply the local slot is freed anyway: better an orphan handle on
      * the server than a local slot lost forever. */
-    udpfs_client_close(slot->server_handle);
+    if (slot->epoch == g_srv_epoch)     /* a stale number may belong to another file now */
+        udpfs_client_close(slot->server_handle);
     slot->in_use = 0;
     return 0;
 }

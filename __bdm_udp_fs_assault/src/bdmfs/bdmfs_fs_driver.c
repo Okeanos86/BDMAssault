@@ -25,6 +25,7 @@
 
 #include "include/fs_driver.h"
 #include "udpfs_stub.h"
+#include "bdmfs_vcd.h"
 
 //#define DEBUG  //comment out this line when not debugging
 #include "include/module_debug.h"
@@ -249,6 +250,15 @@ static FIL *fs_find_free_fil_structure(void)
     return NULL;
 }
 
+#ifndef EMBER_BUILD
+/* For the cue/bin backend (bdmfs_vcd_usb.c): a free FIL of the pool. Called
+ * with the lock held, like fs_find_free_fil_structure itself. */
+static void *vcd_alloc_fil(void)
+{
+    return fs_find_free_fil_structure();
+}
+#endif
+
 static DIR *fs_find_free_dir_structure(void)
 {
     int i;
@@ -340,11 +350,31 @@ static int fs_open(iop_file_t *fd, const char *name, int flags, int mode)
     if (ret < 0 &&
         (flags & (O_WRONLY | O_CREAT | O_TRUNC | O_APPEND)) == 0 &&
         udpfs_stub_path_matches(name)) {
-        void *net = udpfs_stub_open(name);
+        void *net = NULL;
+        int err   = 0;
+
+#ifndef EMBER_BUILD
+        /* A .cue + .bin on the USB drive stands in for the missing .VCD. */
+        if (vcd_virtual_open(vcd_usb_ops(_fs_lock, _fs_unlock, vcd_alloc_fil), modified_name, &net) == 0) {
+            fd->privdata = net;
+            return 1;
+        }
+        net = NULL;
+#endif
+        net = udpfs_stub_open_ex(name, 0, &err);
         if (net != NULL) {
             fd->privdata = net;
             ret          = 1;
         }
+#ifndef EMBER_BUILD
+        /* The server has no .VCD either (it answered "no such file", so it
+         * is there): a .cue + .bin on the server. Not tried when it did not
+         * answer at all, that would only wait for a second timeout. */
+        else if (err == -ENOENT && vcd_virtual_open(&vcd_net_ops, name, &net) == 0) {
+            fd->privdata = net;
+            ret          = 1;
+        }
+#endif
     }
 
     return ret;
@@ -356,6 +386,12 @@ static int fs_close(iop_file_t *fd)
     M_DEBUG("%s\n", __func__);
 
     int ret = FR_OK;
+
+    if (fd->privdata && vcd_virtual_is_ours(fd->privdata)) {
+        vcd_virtual_close(fd->privdata);
+        fd->privdata = NULL;
+        return 0;
+    }
 
     if (fd->privdata && udpfs_stub_is_ours(fd->privdata)) {
         udpfs_stub_close(fd->privdata);
@@ -384,6 +420,12 @@ s64 fs_lseek64(iop_file_t *fd, s64 offset, int whence)
 
     if (fd->privdata == NULL)
         return -ENOENT;
+
+    if (vcd_virtual_is_ours(fd->privdata)) {
+        int64_t out_pos = 0;
+        res = vcd_virtual_lseek64(fd->privdata, offset, whence, &out_pos);
+        return (res == 0) ? (s64)out_pos : res;
+    }
 
     if (udpfs_stub_is_ours(fd->privdata)) {
         s64 out_pos = 0;
@@ -433,7 +475,7 @@ static int fs_write(iop_file_t *fd, void *buffer, int size)
      * struct FIL, and its fields (in_use, server_handle, position, size)
      * would be interpreted as FatFs internal state - memory corruption,
      * not just an error. */
-    if (udpfs_stub_is_ours(fd->privdata))
+    if (udpfs_stub_is_ours(fd->privdata) || vcd_virtual_is_ours(fd->privdata))
         return -EROFS;
 
     _fs_lock();
@@ -454,6 +496,9 @@ static int fs_read(iop_file_t *fd, void *buffer, int size)
 
     if (fd->privdata == NULL)
         return -ENOENT;
+
+    if (vcd_virtual_is_ours(fd->privdata))
+        return vcd_virtual_read(fd->privdata, buffer, size);
 
     if (udpfs_stub_is_ours(fd->privdata))
         return udpfs_stub_read(fd->privdata, buffer, size);
@@ -727,7 +772,7 @@ int fs_ioctl2(iop_file_t *fd, int cmd, void *data, unsigned int datalen, void *r
      * actually be a udpfs_stub_slot_t: reading it as a FIL
      * (file->obj.sclust, file->obj.fs, ...) is an invalid memory access,
      * not just an application error. */
-    if (udpfs_stub_is_ours(file))
+    if (udpfs_stub_is_ours(file) || vcd_virtual_is_ours(file))
         return -EINVAL;
 
     _fs_lock();

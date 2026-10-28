@@ -20,7 +20,9 @@
 
 #include <iomanX.h>
 
-#define UDPFS_STUB_MAX_HANDLES 4
+/* One slot per open UDPFS file: a plain .VCD uses one, a virtual VCD made of
+ * a cue sheet and several .bin files (bdmfs_vcd.h) up to three at a time. */
+#define UDPFS_STUB_MAX_HANDLES 6
 
 /* Returns 1 if "name" is a file for which the UDPFS fallback is allowed,
  * otherwise 0. One rule per build (case-insensitive comparison, leading
@@ -38,6 +40,15 @@ int udpfs_stub_path_matches(const char *name);
  * open fails (network not ready, timeout, file not found on the
  * server side, slot pool full). */
 void *udpfs_stub_open(const char *path);
+
+/* Same, and says why it failed: *err = 0, -ENOENT (the server answered that
+ * it has no such file), -EIO (no answer: network down, server off) or
+ * -EMFILE (slot pool full). need_size = 1 makes the open fail if the size of
+ * the file cannot be found out. */
+void *udpfs_stub_open_ex(const char *path, int need_size, int *err);
+
+/* Size of the file of an open slot (0 = unknown). */
+unsigned int udpfs_stub_size(void *privdata);
 
 /* Checks whether an fd->privdata pointer belongs to the fake slot pool
  * (range-check on the static array, no dereferencing). */
